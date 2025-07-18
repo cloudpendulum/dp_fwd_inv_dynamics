@@ -6,13 +6,14 @@ Forward and Inverse Dynamics of a Double Pendulum
 1. Pull the docker image: 
 ```docker pull costashatz/optrob25:latest```
 
-2. Pull the dp_fwd_inv_dynamics repo: 
+2. Clone the dp_fwd_inv_dynamics repo and move inside it: 
 ```git clone https://github.com/cloudpendulum/dp_fwd_inv_dynamics.git``` 
+```cd dp_fwd_inv_dynamics```
 
-3. Run the command:
+4. Run the command:
 ```docker run --rm -it --privileged -v /sys:/sys -v /dev:/dev -v /run/udev:/run/udev --net=host -e DISPLAY -v ${HOME}/.Xauthority:/home/robot/.Xauthority -v "$(pwd)":/home/robot/code --entrypoint /bin/bash costashatz/optrob25```⁠
 
-4. Run the notebook ```fwd_inv_dynamics_student.ipynb``` inside your docker.
+5. Run the notebook ```fwd_inv_dynamics_student.ipynb``` inside your docker using the command ```jupyter lab```.
 
 # Docker Installation
 
