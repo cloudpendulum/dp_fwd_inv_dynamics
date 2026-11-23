@@ -19,9 +19,9 @@ def get_arrow(radius, centX, centY, angle_, theta2_, color_='black'):
     endY = centY+(radius/2)*np.sin(rad(theta2_+angle_))
 
     head = RegularPolygon((endX, endY),            # (x,y)
-                          3,                       # number of vertices
-                          radius/20,                # radius
-                          rad(angle_+theta2_),     # orientation
+                          numVertices=3,
+                          radius=radius/20,
+                          orientation=rad(angle_+theta2_),
                           color=color_)
     return arc, head
 

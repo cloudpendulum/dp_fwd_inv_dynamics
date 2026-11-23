@@ -4,7 +4,7 @@ from matplotlib.animation import FuncAnimation
 import matplotlib.animation as mplanimation
 import time
 import math
-import wget
+import requests
 import subprocess
 from pathlib import Path
 
@@ -82,7 +82,7 @@ class Simulator:
         # self.record_data(self.t, self.x.copy(), tau)
 
     def simulate(self, t0, x0, tf, dt, controller=None, integrator="runge_kutta"):
-        self.set_state(t0, x0)
+        self.set_state(t0, np.array(x0, dtype=float))
         self.reset_data_recorder()
 
         while self.t <= tf:
@@ -106,47 +106,25 @@ class Simulator:
         )
         self.animation_ax.get_xaxis().set_visible(False)
         self.animation_ax.get_yaxis().set_visible(False)
-        plt.axis("off")
-        plt.tight_layout()
+        self.animation_ax.axis("off")
         for ap in self.animation_plots[:-1]:
             ap.set_data([], [])
         self.animation_plots[-1].set_text("t = 0.000")
 
         self.ee_poses = []
-        self.tau_arrowarcs = []
-        self.tau_arrowheads = []
-        for link in range(self.plant.n_links):
-            arc, head = get_arrow(
-                radius=0.001, centX=0, centY=0, angle_=110, theta2_=320, color_="red"
-            )
-            self.tau_arrowarcs.append(arc)
-            self.tau_arrowheads.append(head)
-            self.animation_ax.add_patch(arc)
-            self.animation_ax.add_patch(head)
+        for arc, head in zip(self.tau_arrowarcs, self.tau_arrowheads):
+            arc.set_visible(False)
+            head.set_visible(False)
 
         return self.animation_plots + self.tau_arrowarcs + self.tau_arrowheads
 
-    def _animation_step(self, par_dict):
+    def _animation_step(self, frame):
         """
-        simulation of a single step which also updates the animation plot
+        Draw one precomputed animation frame (no simulation happens here).
         """
-        dt = par_dict["dt"]
-        controller = par_dict["controller"]
-        integrator = par_dict["integrator"]
-        anim_dt = par_dict["anim_dt"]
-        trail_len = 25  # length of the trails
-        sim_steps = int(anim_dt / dt)
-
-        realtime = True
-        for _ in range(sim_steps):
-            if controller is not None:
-                t0 = time.time()
-                tau = controller.get_control_output(x=self.x, t=self.t)
-                if time.time() - t0 > dt:
-                    realtime = False
-            else:
-                tau = np.zeros(self.plant.n_actuators)
-            self.step(tau, dt, integrator=integrator)
+        x = frame["x"]
+        tau = frame["tau"]
+        t = frame["t"]
 
         ani_plot_counter = 0
 
@@ -154,10 +132,10 @@ class Simulator:
         if self.desired_state:
             ee_pos_des = self.plant.forward_kinematics(self.x_des[: self.plant.dof])
         if self.desired_traj:
-            t = min(self.t, self.T_des[-2])
-            ind = np.argwhere(self.T_des > t)[0]
-            x = self.X_des[ind][0]
-            ee_pos_des = self.plant.forward_kinematics(x[: self.plant.dof])
+            t_des = min(t, self.T_des[-2])
+            ind = np.argwhere(self.T_des > t_des)[0]
+            x_des = self.X_des[ind][0]
+            ee_pos_des = self.plant.forward_kinematics(x_des[: self.plant.dof])
 
         if self.desired_state or self.desired_traj:
             ee_pos_des.insert(0, self.plant.base)
@@ -169,12 +147,12 @@ class Simulator:
                 ani_plot_counter += 1
 
         # regular pendulum
-        ee_pos = self.plant.forward_kinematics(self.x[: self.plant.dof])
+        ee_pos = self.plant.forward_kinematics(x[: self.plant.dof])
         ee_pos.insert(0, self.plant.base)
 
         self.ee_poses.append(ee_pos)
-        if len(self.ee_poses) > trail_len:
-            self.ee_poses = np.delete(self.ee_poses, 0, 0).tolist()
+        if len(self.ee_poses) > self.trail_len:
+            self.ee_poses.pop(0)
 
         # plot links
         for link in range(self.plant.n_links):
@@ -185,36 +163,29 @@ class Simulator:
             ani_plot_counter += 1
 
         # plot base
-        self.animation_plots[ani_plot_counter].set_data(ee_pos[0][0], ee_pos[0][1])
+        self.animation_plots[ani_plot_counter].set_data([ee_pos[0][0]], [ee_pos[0][1]])
         ani_plot_counter += 1
 
         # desired trajectory (shadow)
         if self.desired_state or self.desired_traj:
             for link in range(self.plant.n_links):
                 self.animation_plots[ani_plot_counter].set_data(
-                    ee_pos_des[link + 1][0], ee_pos_des[link + 1][1]
+                    [ee_pos_des[link + 1][0]], [ee_pos_des[link + 1][1]]
                 )
                 ani_plot_counter += 1
 
-                set_arrow_properties(
-                    self.tau_arrowarcs[link],
-                    self.tau_arrowheads[link],
-                    tau[link],
-                    ee_pos[link][0],
-                    ee_pos[link][1],
-                )
-
         # plot bodies
+        trail = np.asarray(self.ee_poses)
         for link in range(self.plant.n_links):
             self.animation_plots[ani_plot_counter].set_data(
-                ee_pos[link + 1][0], ee_pos[link + 1][1]
+                [ee_pos[link + 1][0]], [ee_pos[link + 1][1]]
             )
             ani_plot_counter += 1
 
             if self.plot_trail:
                 self.animation_plots[ani_plot_counter].set_data(
-                    np.asarray(self.ee_poses)[:, link + 1, 0],
-                    np.asarray(self.ee_poses)[:, link + 1, 1],
+                    trail[:, link + 1, 0],
+                    trail[:, link + 1, 1],
                 )
                 ani_plot_counter += 1
 
@@ -227,37 +198,41 @@ class Simulator:
             )
 
         if self.plot_inittraj:
-            T, X, U = controller.get_init_trajectory()
-            coords = []
-            for x in X:
-                coords.append(self.plant.forward_kinematics(x[: self.plant.dof])[-1])
-
-            coords = np.asarray(coords)
-            self.animation_plots[ani_plot_counter].set_data(coords.T[0], coords.T[1])
+            self.animation_plots[ani_plot_counter].set_data(*self._inittraj_coords)
             ani_plot_counter += 1
 
         if self.plot_forecast:
-            T, X, U = controller.get_forecast()
-            coords = []
-            for x in X:
-                coords.append(self.plant.forward_kinematics(x[: self.plant.dof])[-1])
-
-            coords = np.asarray(coords)
-            self.animation_plots[ani_plot_counter].set_data(coords.T[0], coords.T[1])
+            self.animation_plots[ani_plot_counter].set_data(*frame["forecast"])
             ani_plot_counter += 1
 
-        t = float(self.animation_plots[ani_plot_counter].get_text()[4:])
-        t = round(t + dt * sim_steps, 3)
-        self.animation_plots[ani_plot_counter].set_text(f"t = {t}")
+        self.animation_plots[ani_plot_counter].set_text(f"t = {t:.3f}")
 
-        # if the animation runs slower than real time
+        # if the controller ran slower than real time
         # the time display will be red
-        if not realtime:
-            self.animation_plots[ani_plot_counter].set_color("red")
-        else:
-            self.animation_plots[ani_plot_counter].set_color("black")
+        self.animation_plots[ani_plot_counter].set_color(
+            "black" if frame["realtime"] else "red"
+        )
 
         return self.animation_plots + self.tau_arrowarcs + self.tau_arrowheads
+
+    def _ee_coords(self, X):
+        """End-effector x/y coordinates for a sequence of states."""
+        coords = np.asarray(
+            [self.plant.forward_kinematics(x[: self.plant.dof])[-1] for x in X]
+        )
+        return coords.T[0], coords.T[1]
+
+    def _make_frame(self, tau, realtime, controller):
+        frame = {
+            "t": self.t,
+            "x": np.array(self.x, dtype=float),
+            "tau": np.array(tau, dtype=float),
+            "realtime": realtime,
+        }
+        if self.plot_forecast:
+            _, X, _ = controller.get_forecast()
+            frame["forecast"] = self._ee_coords(X)
+        return frame
 
     def simulate_and_animate(
         self,
@@ -273,22 +248,63 @@ class Simulator:
         phase_plot=False,
         save_video=False,
         video_name="pendulum_swingup",
-        anim_dt=0.02,
+        anim_dt=0.04,
+        trail_time=0.5,
+        dpi=80,
     ):
         """
-        Simulation and animation of the pendulum motion
-        The animation is only implemented for 2d serial chains
+        Simulation and animation of the pendulum motion.
+        The animation is only implemented for 2d serial chains.
+
+        The system is simulated with the step size `dt`, but only one frame
+        every `anim_dt` seconds is drawn (default 0.04 s = 25 fps). The
+        animation therefore plays in real time and its rendering cost does
+        not depend on `dt`.
+
+        :param anim_dt: Time between animation frames. Rounded to a multiple
+            of `dt`.
+        :param trail_time: Length of the drawn trails in seconds.
+        :param dpi: Resolution of the animation frames. Lower is faster.
         """
 
         self.plot_inittraj = plot_inittraj
         self.plot_forecast = plot_forecast
         self.plot_trail = plot_trail
-        self.set_state(t0, x0)
+
+        # --- 1. Simulate with full resolution, store only the frames we draw
+        steps_per_frame = max(1, int(round(anim_dt / dt)))
+        anim_dt = steps_per_frame * dt
+
+        self.set_state(t0, np.array(x0, dtype=float))
         self.reset_data_recorder()
 
-        fig = plt.figure(figsize=(5, 5))
-        self.animation_ax = plt.axes()
+        tau = np.zeros(self.plant.n_actuators)
+        frames = [self._make_frame(tau, True, controller)]
+        realtime = True
+        n_steps = 0
+        while self.t <= tf:
+            if controller is not None:
+                t_start = time.time()
+                tau = controller.get_control_output(x=self.x, t=self.t)
+                if time.time() - t_start > dt:
+                    realtime = False
+            else:
+                tau = np.zeros(self.plant.n_actuators)
+            self.step(tau, dt, integrator=integrator)
+            n_steps += 1
+            if n_steps % steps_per_frame == 0:
+                frames.append(self._make_frame(tau, realtime, controller))
+                realtime = True
+
+        if self.plot_inittraj:
+            _, X, _ = controller.get_init_trajectory()
+            self._inittraj_coords = self._ee_coords(X)
+
+        # --- 2. Build the figure
+        fig = plt.figure(figsize=(5, 5), dpi=dpi)
+        self.animation_ax = fig.add_axes([0, 0, 1, 1])
         self.animation_plots = []
+        self.trail_len = max(2, int(round(trail_time / anim_dt)))
 
         colors = ["#0077BE", "#f66338"]
         colors_trails = ["#d2eeff", "#ffebd8"]
@@ -347,19 +363,22 @@ class Simulator:
             self.animation_plots.append(fc_plot)
 
         text_plot = self.animation_ax.text(
-            0.1, 0.9, [], fontsize=20, transform=fig.transFigure
+            0.1, 0.9, "", fontsize=20, transform=fig.transFigure
         )
-
         self.animation_plots.append(text_plot)
 
-        num_steps = int(tf / anim_dt)
-        par_dict = {}
-        par_dict["dt"] = dt
-        par_dict["anim_dt"] = anim_dt
-        par_dict["controller"] = controller
-        par_dict["integrator"] = integrator
-        frames = num_steps * [par_dict]
+        self.tau_arrowarcs = []
+        self.tau_arrowheads = []
+        for link in range(self.plant.n_links):
+            arc, head = get_arrow(
+                radius=0.001, centX=0, centY=0, angle_=110, theta2_=320, color_="red"
+            )
+            self.tau_arrowarcs.append(arc)
+            self.tau_arrowheads.append(head)
+            self.animation_ax.add_patch(arc)
+            self.animation_ax.add_patch(head)
 
+        # --- 3. Animation that only redraws the precomputed frames
         animation = FuncAnimation(
             fig,
             self._animation_step,
@@ -367,21 +386,16 @@ class Simulator:
             init_func=self._animation_init,
             blit=True,
             repeat=False,
-            interval=dt * 1000,
+            interval=anim_dt * 1000,
             cache_frame_data=False,
         )
 
         if save_video:
             print(f"Saving video to {video_name}.mp4")
             Writer = mplanimation.writers["ffmpeg"]
-            writer = Writer(fps=60, bitrate=1800)
+            writer = Writer(fps=round(1.0 / anim_dt), bitrate=1800)
             animation.save(video_name + ".mp4", writer=writer)
             print("Saving video done.")
-        else:
-            self.set_state(t0, x0)
-            self.reset_data_recorder()
-            # plt.show()
-        # plt.close()
 
         return self.t_values, self.x_values, self.tau_values, animation
 
@@ -451,25 +465,30 @@ class Simulator:
             from cloud_pendulum_local import Client
             user_token = ""
         else:
-            from cloudpendulumclient.client import Client
+            from pycloudpendulum import Client
 
         import time
 
         self.c = Client()
 
-        initial_state = x0.copy()
-        if initial_state is not None:
-            initial_state = initial_state[0:len(initial_state)//2]
+        initial_position = None
+        if x0 is not None:
+            initial_position = [float(q) for q in x0[0:len(x0)//2]]
         session_token, self.live_url = self.c.start_experiment(
-            user_token, experiment_type, tf, preparation_time = preparation_time, record=record, initial_state=initial_state
+            user_token=user_token,
+            experiment_type=experiment_type,
+            experiment_time=tf,
+            preparation_time=preparation_time,
+            record=record,
+            initial_position=initial_position,
         )
         print("Your session token is:", session_token)
 
         self.vod_filepath = None
         
         # # set zero impedance (kp=kd=0) for pure torque control
-        kp=0.0
-        kd=0.0
+        kp = [0.0, 0.0]
+        kd = [0.0, 0.0]
         self.c.set_impedance_controller_params(kp, kd, session_token)
 
         n = int(tf / dt)
@@ -496,7 +515,7 @@ class Simulator:
         print("Control Loop Started!")
         # Auto update loop is running in the background updating data in candle.md80s vector. Each md80 object can be
         # Called for data at any time
-        while meas_time < tf:
+        while meas_time < tf and i < n:
             start_loop = time.time()
             # meas_time += meas_dt      
             measured_position=self.c.get_position(session_token)
@@ -512,7 +531,7 @@ class Simulator:
                 # Control logic
             if controller is not None:
                 tau = controller.get_control_output(x=self.x, t=meas_time)
-                tau=list(tau)
+                tau = [float(t) for t in tau]
                 self.c.set_torque(tau, session_token)
             else:
                 tau = [0.0, 0.0]
@@ -557,20 +576,52 @@ class Simulator:
 
         download_url = self.c.stop_experiment(session_token)
 
-        if record==True:
-            filename = wget.download(download_url,".")
-            self.vod_filepath = f'{Path(filename).stem}.mp4'
-            self.convert_flv_to_mp4(f'{filename}', self.vod_filepath)
+        if record and download_url:
+            self.vod_filepath = self.download_video(download_url)
         
         # Stack and return data
-        self.t_values = meas_time_vec
+        self.t_values = meas_time_vec[:i]
         self.x_values = np.vstack(
             (meas_pos_shoulder, meas_pos_elbow, meas_vel_shoulder, meas_vel_elbow)
-        ).T
-        self.tau_values = np.vstack((meas_tau_shoulder, meas_tau_elbow)).T
-        self.des_tau_values = np.vstack((des_tau_shoulder, des_tau_elbow)).T
+        ).T[:i]
+        self.tau_values = np.vstack((meas_tau_shoulder, meas_tau_elbow)).T[:i]
+        self.des_tau_values = np.vstack((des_tau_shoulder, des_tau_elbow)).T[:i]
 
         return self.t_values, self.x_values, self.tau_values, self.des_tau_values, self.vod_filepath
+
+    def download_video(self, url, timeout=120.0, retry_interval=5.0):
+        """
+        Download the experiment recording and convert it to MP4.
+
+        The server finalizes the recording asynchronously after the experiment
+        is stopped, so the file may be empty for a while. Retry until a
+        non-empty file is received or `timeout` seconds have passed.
+
+        :return: Path to the MP4 file, or None if the video was not available.
+        """
+        filename = Path(url.split("?")[0]).name or "recording.flv"
+        print("Downloading video (the server may need some time to finalize it) ...")
+        start = time.time()
+        while True:
+            try:
+                r = requests.get(url, timeout=30)
+                if r.status_code == 200 and len(r.content) > 0:
+                    with open(filename, "wb") as f:
+                        f.write(r.content)
+                    break
+            except requests.RequestException as e:
+                print(f"Download attempt failed: {e}")
+            if time.time() - start > timeout:
+                print(f"Video not available yet. You can open it later at:\n{url}")
+                return None
+            time.sleep(retry_interval)
+
+        if Path(filename).suffix.lower() == ".mp4":
+            return filename
+        output_path = f"{Path(filename).stem}.mp4"
+        if self.convert_flv_to_mp4(filename, output_path):
+            return output_path
+        return None
 
     def convert_flv_to_mp4(self, input_path, output_path):
         """
@@ -581,6 +632,7 @@ class Simulator:
         """
         command = [
             "ffmpeg",
+            "-y",                # Overwrite output if it exists
             "-i", input_path,    # Input file
             "-c:v", "copy",      # Copy video stream
             "-c:a", "copy",      # Copy audio stream
@@ -589,5 +641,6 @@ class Simulator:
         process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if process.returncode == 0:
             print(f"Conversion successful: {output_path}")
-        else:
-            print(f"Error during conversion: {process.stderr.decode()}")
+            return True
+        print(f"Error during conversion: {process.stderr.decode()}")
+        return False

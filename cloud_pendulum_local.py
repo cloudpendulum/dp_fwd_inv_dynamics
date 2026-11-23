@@ -89,8 +89,13 @@ class Client:
         self,
         user_token: str = "",
         experiment_type: str = "",
-        requested_time: float = 0.0,
-        record: bool = False
+        experiment_time: float = 0.0,
+        preparation_time: float = 0.0,
+        record: bool = False,
+        cell_id: int | None = None,
+        initial_position: list[float] | None = None,
+        disturbances=None,
+        timeout: float | None = None,
     ) -> tuple[str, str]:
         """Start the experiment by starting the candle loop
 
